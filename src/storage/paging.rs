@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::byte_encoder::{ByteDecoder, ByteEncoder};
 
-use super::b_tree::{BTreePageType, BtreeNode};
+use super::b_tree::{BTreePageType, Node};
 
 #[repr(C, packed)]
 struct PageHeader {

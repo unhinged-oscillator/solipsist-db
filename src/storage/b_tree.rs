@@ -29,7 +29,7 @@ impl From<u8> for BTreePageType {
 #[derive(Debug)]
 pub struct KeysIterator<'a> {
     results: VecDeque<u64>,
-    queue: VecDeque<&'a BtreeNode>,
+    queue: VecDeque<&'a Node>,
 }
 
 impl<'a> Default for KeysIterator<'a> {
@@ -48,20 +48,26 @@ impl<'a> Iterator for KeysIterator<'a> {
         if !self.results.is_empty() {
             return self.results.pop_front();
         }
-        if let Some(node) = self.queue.pop_front() {
-            println!("ITERATOR IN QUEUE {:?}", node);
-            match &node.inner {
-                BTreeInner::Leaf(values) => {
-                    for value in values.iter() {
-                        self.results.push_back(value.key);
+        loop {
+            if let Some(node) = self.queue.pop_front() {
+                match &node {
+                    Node::Leaf { values, .. } => {
+                        for value in values.iter() {
+                            self.results.push_back(value.key);
+                        }
+
+                        if !values.is_empty() {
+                            break;
+                        }
+                    }
+                    Node::Internal { children, .. } => {
+                        for child in children.iter() {
+                            self.queue.push_back(child);
+                        }
                     }
                 }
-                BTreeInner::Internal { keys, children } => {
-                    for child in children.iter() {
-                        self.queue.push_back(child);
-                    }
-                }
-                _ => {}
+            } else {
+                break;
             }
         }
         if !self.results.is_empty() {
@@ -84,122 +90,126 @@ impl KeyValuePair {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct BtreeNode {
-    is_root: bool,
-    inner: BTreeInner,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum BTreeInner {
+pub enum Node {
     Internal {
         keys: Vec<u64>,
-        children: Vec<BtreeNode>,
+        children: Vec<Node>,
     },
-    Leaf(Vec<KeyValuePair>),
+
+    Leaf {
+        keys: Vec<u64>,
+        values: Vec<KeyValuePair>,
+    },
 }
 
-impl Default for BtreeNode {
-    fn default() -> Self {
-        BtreeNode {
-            is_root: false,
-            inner: BTreeInner::Leaf(vec![]),
-        }
-    }
-}
-
-impl BtreeNode {
+impl Node {
     fn new_leaf() -> Self {
-        BtreeNode {
-            is_root: false,
-            inner: BTreeInner::Leaf(vec![]),
+        Node::Leaf {
+            keys: vec![],
+            values: vec![],
         }
     }
 
     fn new_internal() -> Self {
-        BtreeNode {
-            is_root: false,
-            inner: BTreeInner::Internal {
-                keys: vec![],
-                children: vec![],
-            },
+        Node::Internal {
+            keys: vec![],
+            children: vec![],
         }
     }
 
-    // fn search(&self, key: u64) -> Option<&KeyValuePair> {
-    //     match self.keys.binary_search(&key) {
-    //         Ok(index) => Some(&self.values[index]),
-    //         Err(index) => {
-    //             if self.is_leaf() {
-    //                 None
-    //             } else {
-    //                 self.children.as_ref().unwrap()[index].search(key)
-    //             }
-    //         }
-    //     }
-    // }
+    pub fn is_full(&self) -> bool {
+        match self {
+            Node::Leaf { keys, .. } => keys.len() > 2 * ORDER - 1,
+            Node::Internal { children, .. } => children.len() > 2 * ORDER,
+        }
+    }
 
-    // fn insert(&mut self, key: u64, value: KeyValuePair) {
-    //     let index = match self.keys.binary_search(&key) {
-    //         Ok(index) => index,
-    //         Err(index) => index,
-    //     };
-
-    //     println!("INSERTING key [{key:?}] = [{value:?}] into {self:?}");
-
-    //     if self.is_leaf() {
-    //         self.keys.insert(index, key);
-    //         self.values.insert(index, value);
-    //     } else {
-    //         let child = &mut self.children.as_mut().unwrap()[index];
-    //         child.insert(key, value);
-    //     }
-
-    //     if self.keys.len() > 2 * ORDER - 1 {
-    //         self.split();
-    //     }
-    // }
-
-    /// split creates sibling node for either Internal Node Or
-    fn split(&mut self, median: usize) -> (u64, BtreeNode) {
-        // let median = ORDER;
-
-        match self.inner {
-            BTreeInner::Internal {
-                ref mut children,
-                ref mut keys,
-            } => {
-                // Populate siblings keys.
-                println!("SPLITTING INTERNAL {:?}", keys);
-                let mut sibling_keys = keys.split_off(median - 1);
-                // Pop median key - to be added to the parent..
-                let median_key = sibling_keys.remove(0);
-                // Populate siblings children.
-                let sibling_children = children.split_off(median);
-                (
-                    median_key,
-                    BtreeNode {
-                        inner: BTreeInner::Internal {
-                            children: sibling_children,
-                            keys: sibling_keys,
-                        },
-                        is_root: false,
-                    },
-                )
+    // Split a node into two new nodes when it has more than `ORDER` keys
+    fn split(&mut self) -> (Node, u64, Node) {
+        let mid = match self {
+            Node::Leaf { values, .. } => values.len() / 2 + 1,
+            Node::Internal { keys, .. } => keys.len() / 2,
+        };
+        match self {
+            Node::Leaf { keys, values } => {
+                let (keys, values) = (keys.clone(), values.clone());
+                println!("SPLITTING AT {mid} | {keys:?} | {values:?}");
+                let left = Node::Leaf {
+                    keys: keys[..mid].to_vec(),
+                    values: values[..mid].to_vec(),
+                };
+                let right = Node::Leaf {
+                    keys: keys[mid..].to_vec(),
+                    values: values[mid..].to_vec(),
+                };
+                (left, keys[mid - 1], right)
             }
-            BTreeInner::Leaf(ref mut pairs) => {
-                // Populate siblings pairs.
-                let sibling_pairs = pairs.split_off(median);
-                // Pop median key.
-                let median_pair = pairs.get(median - 1).unwrap().clone();
-
-                (
-                    median_pair.key,
-                    BtreeNode {
-                        inner: BTreeInner::Leaf(sibling_pairs),
-                        is_root: false,
-                    },
-                )
+            Node::Internal { keys, children } => {
+                let (keys, children) = (keys.clone(), children.clone());
+                let left = Node::Internal {
+                    keys: keys[..mid].to_vec(),
+                    children: children[..mid + 1].to_vec(),
+                };
+                let right = Node::Internal {
+                    keys: keys[mid + 1..].to_vec(),
+                    children: children[mid + 1..].to_vec(),
+                };
+                (left, keys[mid], right)
             }
+        }
+    }
+
+    // Insert a key-value pair into the B+ tree
+    fn insert(&mut self, key: u64, value: Vec<u8>) {
+        match self {
+            Node::Leaf { keys, values } => {
+                match keys.binary_search(&key) {
+                    Ok(pos) => panic!("key '{pos}' already exists"),
+                    Err(pos) => {
+                        keys.insert(pos, key);
+                        values.insert(pos, KeyValuePair { key, value });
+                        pos
+                    }
+                };
+
+                // split leaf node if it has become too large
+                if self.is_full() {
+                    let (left, new_key, right) = self.split();
+
+                    *self = Node::Internal {
+                        keys: vec![new_key],
+                        children: vec![left, right],
+                    };
+                }
+            }
+            Node::Internal { keys, children } => {
+                let pos = match keys.binary_search(&key) {
+                    Ok(_) => panic!("Duplicate key"),
+                    Err(pos) => pos,
+                };
+
+                // call child to insert data
+                let child = &mut children[pos];
+                child.insert(key, value);
+                if child.is_full() {
+                    let (left, new_key, right) = child.split();
+                    *child = left;
+                    keys.insert(pos, new_key);
+                    children.insert(pos + 1, right);
+                    // return left;
+                }
+                // return self;
+            }
+        }
+    }
+
+    fn search_leaf(&self, key: u64) -> &Self {
+        match &self {
+            Node::Internal { keys, children } => match keys.binary_search(&key) {
+                Ok(index) => children[index].search_leaf(key),
+                Err(_) => panic!(),
+            },
+            Node::Leaf { .. } => self,
         }
     }
 
@@ -244,44 +254,50 @@ impl BtreeNode {
 
 #[derive(Debug)]
 pub struct Btree {
-    root: BtreeNode,
+    root: Node,
 }
 
-impl<'a> Btree {
+impl Btree {
     pub fn new() -> Self {
         Btree {
-            root: BtreeNode::new_leaf(),
+            root: Node::new_leaf(),
         }
     }
 
-    // pub fn insert(&mut self, key: u64, value: KeyValuePair) {
-    //     println!(
-    //         "NEEDS NEW ROOT? {:?} == {}",
-    //         self.root.keys.len(),
-    //         2 * ORDER - 1
-    //     );
-    //     if self.root.keys.len() == 2 * ORDER - 1 {
-    //         // let mut new_root = BtreeNode::new();
-    //         // new_root.children = Some(vec![std::mem::take(&mut self.root)]);
-    //         // println!("TOOK NEW ROOT {new_root:?}");
-    //         // new_root.is_leaf = false;
-    //         // self.root = new_root;
-    //         self.root.split();
-    //         println!("NOW SPLIT ROOT {:?}", self.root);
-    //     }
-    //     self.root.insert(key, value);
-    // }
+    pub fn search(&self, key: u64) -> Option<KeyValuePair> {
+        self.search_node(&self.root, key)
+    }
 
-    // pub fn search(&self, key: K) -> Option<&V> {
-    //     println!("ROOT {:?} -> {:?}", key, self);
-    //     self.root.search(&key)
-    // }
+    /// search_node recursively searches a sub tree rooted at node for a key.
+    fn search_node(&self, node: &Node, search: u64) -> Option<KeyValuePair> {
+        match &node {
+            Node::Internal { children, keys } => {
+                let idx = keys.binary_search(&search).unwrap_or_else(|x| x);
+                // Retrieve child page from disk and deserialize.
+                let child_node = children.get(idx).unwrap();
+                // let page = self.pager.get_page(child_offset)?;
+                // let child_node = Node::try_from(page)?;
+                self.search_node(child_node, search)
+            }
+            Node::Leaf { values, .. } => {
+                if let Ok(idx) = values.binary_search_by_key(&search, |pair| pair.key) {
+                    return Some(values[idx].clone());
+                }
+                None
+                // Err(Error::KeyNotFound)
+            } // Node::Unexpected => Err(Error::UnexpectedError),
+        }
+    }
 
-    // pub fn keys(&'a self) -> KeysIterator<'a> {
-    //     let mut iterator = KeysIterator::default();
-    //     iterator.queue.push_back(&self.root);
-    //     iterator
-    // }
+    pub fn insert(&mut self, key: u64, value: Vec<u8>) {
+        self.root.insert(key, value);
+    }
+
+    pub fn keys(&self) -> KeysIterator {
+        let mut iterator = KeysIterator::default();
+        iterator.queue.push_back(&self.root);
+        iterator
+    }
 
     // pub fn remove(&mut self, key: u64) -> Option<KeyValuePair> {
     //     self.root.remove(key)
@@ -294,148 +310,215 @@ mod tests {
 
     #[test]
     fn split_leaf_works() {
-        let mut node = BtreeNode {
-            inner: BTreeInner::Leaf(vec![
+        let mut node = Node::Leaf {
+            values: vec![
                 KeyValuePair::new(1, "bar".as_bytes().to_vec()),
                 KeyValuePair::new(2, "james".as_bytes().to_vec()),
                 KeyValuePair::new(3, "grande".as_bytes().to_vec()),
-            ]),
-            is_root: true,
+            ],
+            keys: vec![1, 2, 3],
         };
 
-        let (median, sibling) = node.split(2);
-        assert_eq!(median, 2);
+        let (left, mid, sibling) = node.split();
+        println!("SPLIT LEAF {left:?} | {sibling:?}");
+        assert_eq!(mid, 2);
         assert_eq!(
-            node.inner,
-            BTreeInner::Leaf(vec![
-                KeyValuePair {
-                    key: 1,
-                    value: "bar".as_bytes().to_vec(),
-                },
-                KeyValuePair {
-                    key: 2,
-                    value: "james".as_bytes().to_vec()
-                }
-            ])
+            left,
+            Node::Leaf {
+                values: vec![
+                    KeyValuePair {
+                        key: 1,
+                        value: "bar".as_bytes().to_vec(),
+                    },
+                    KeyValuePair {
+                        key: 2,
+                        value: "james".as_bytes().to_vec()
+                    }
+                ],
+                keys: vec![1, 2],
+            }
         );
         assert_eq!(
-            sibling.inner,
-            BTreeInner::Leaf(vec![KeyValuePair::new(3, "grande".as_bytes().to_vec())])
+            sibling,
+            Node::Leaf {
+                keys: vec![3],
+                values: vec![KeyValuePair::new(3, "grande".as_bytes().to_vec())]
+            }
         );
     }
 
     #[test]
     fn split_internal_works() {
-        let mut node = BtreeNode {
-            inner: BTreeInner::Internal {
-                // vec![
-                //     Offset(PAGE_SIZE),
-                //     Offset(PAGE_SIZE * 2),
-                //     Offset(PAGE_SIZE * 3),
-                //     Offset(PAGE_SIZE * 4),
-                // ],
-                children: vec![
-                    BtreeNode {
-                        inner: BTreeInner::Leaf(vec![KeyValuePair::new(
-                            1,
-                            "bar".as_bytes().to_vec(),
-                        )]),
-                        is_root: false,
-                    },
-                    BtreeNode {
-                        inner: BTreeInner::Leaf(vec![KeyValuePair::new(
-                            2,
-                            "james".as_bytes().to_vec(),
-                        )]),
-                        is_root: false,
-                    },
-                    BtreeNode {
-                        inner: BTreeInner::Leaf(vec![KeyValuePair::new(
-                            3,
-                            "grande".as_bytes().to_vec(),
-                        )]),
-                        is_root: false,
-                    },
-                ],
-                keys: vec![
-                    1, // Key("foo bar".to_string()),
-                    2, // Key("lebron".to_string()),
-                    3, // Key("ariana".to_string()),
-                ],
-            },
-            is_root: true,
+        let mut node = Node::Internal {
+            // vec![
+            //     Offset(PAGE_SIZE),
+            //     Offset(PAGE_SIZE * 2),
+            //     Offset(PAGE_SIZE * 3),
+            //     Offset(PAGE_SIZE * 4),
+            // ],
+            children: vec![
+                Node::Leaf {
+                    keys: vec![],
+                    values: vec![KeyValuePair::new(1, "bar".as_bytes().to_vec())],
+                },
+                Node::Leaf {
+                    keys: vec![],
+                    values: vec![KeyValuePair::new(2, "james".as_bytes().to_vec())],
+                },
+                Node::Leaf {
+                    keys: vec![],
+                    values: vec![KeyValuePair::new(3, "grande".as_bytes().to_vec())],
+                },
+            ],
+            keys: vec![
+                1, // Key("foo bar".to_string()),
+                2, // Key("lebron".to_string()),
+                3, // Key("ariana".to_string()),
+            ],
         };
 
-        let (median, sibling) = node.split(2);
+        let (left, median, sibling) = node.split();
         println!("AFTER SPLIT {} -> {:?}", median, sibling);
         assert_eq!(median, 2);
         assert_eq!(
-            node.inner,
-            BTreeInner::Internal {
+            left,
+            Node::Internal {
                 // vec![Offset(PAGE_SIZE), Offset(PAGE_SIZE * 2)],
                 keys: vec![1],
                 children: vec![
-                    BtreeNode {
-                        inner: BTreeInner::Leaf(vec![KeyValuePair::new(
-                            1,
-                            "bar".as_bytes().to_vec(),
-                        )]),
-                        is_root: false,
+                    Node::Leaf {
+                        keys: vec![],
+                        values: vec![KeyValuePair::new(1, "bar".as_bytes().to_vec(),)],
                     },
-                    BtreeNode {
-                        inner: BTreeInner::Leaf(vec![KeyValuePair::new(
-                            2,
-                            "james".as_bytes().to_vec(),
-                        )]),
-                        is_root: false,
+                    Node::Leaf {
+                        keys: vec![],
+                        values: vec![KeyValuePair::new(2, "james".as_bytes().to_vec(),)],
                     }
                 ]
             }
         );
         assert_eq!(
-            sibling.inner,
-            BTreeInner::Internal {
+            sibling,
+            Node::Internal {
                 // vec![Offset(PAGE_SIZE * 3), Offset(PAGE_SIZE * 4)],
                 keys: vec![3],
-                children: vec![BtreeNode {
-                    inner: BTreeInner::Leaf(vec![KeyValuePair::new(
-                        3,
-                        "grande".as_bytes().to_vec(),
-                    )]),
-                    is_root: false,
+                children: vec![Node::Leaf {
+                    keys: vec![],
+                    values: vec![KeyValuePair::new(3, "grande".as_bytes().to_vec(),)],
                 },],
             }
         );
     }
 
-    // #[test]
-    // fn test_insert() {
-    //     let mut btree = Btree::new();
+    #[test]
+    fn test_insert() {
+        let mut btree = Btree::new();
 
-    //     // Insert key-value pairs
-    //     btree.insert(1, "value1");
-    //     btree.insert(2, "value2");
-    //     btree.insert(3, "value3");
-    //     btree.insert(4, "value4");
-    //     btree.insert(5, "value5");
-    //     btree.insert(6, "value6");
-    //     btree.insert(7, "value7");
-    //     btree.insert(8, "value8");
+        // Insert key-value pairs
+        btree.insert(1, "value1".as_bytes().to_vec());
+        btree.insert(2, "value2".as_bytes().to_vec());
+        btree.insert(3, "value3".as_bytes().to_vec());
+        btree.insert(4, "value4".as_bytes().to_vec());
+        btree.insert(5, "value5".as_bytes().to_vec());
+        btree.insert(6, "value6".as_bytes().to_vec());
+        btree.insert(7, "value7".as_bytes().to_vec());
+        btree.insert(8, "value8".as_bytes().to_vec());
+        btree.insert(9, "value9".as_bytes().to_vec());
+        btree.insert(10, "value10".as_bytes().to_vec());
+        btree.insert(11, "value11".as_bytes().to_vec());
+        btree.insert(12, "value12".as_bytes().to_vec());
 
-    //     // Check the values are stored correctly
-    //     assert_eq!(btree.search(1), Some(&"value1"));
-    //     assert_eq!(btree.search(2), Some(&"value2"));
-    //     assert_eq!(btree.search(3), Some(&"value3"));
-    //     assert_eq!(btree.search(4), Some(&"value4"));
-    //     assert_eq!(btree.search(5), Some(&"value5"));
-    //     assert_eq!(btree.search(6), Some(&"value6"));
-    //     assert_eq!(btree.search(7), Some(&"value7"));
-    //     assert_eq!(btree.search(8), Some(&"value8"));
+        println!("BTREE AFTER ALL {btree:?}");
+        // Check the values are stored correctly
+        assert_eq!(
+            btree.search(1),
+            Some(KeyValuePair {
+                key: 1,
+                value: "value1".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(2),
+            Some(KeyValuePair {
+                key: 2,
+                value: "value2".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(3),
+            Some(KeyValuePair {
+                key: 3,
+                value: "value3".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(4),
+            Some(KeyValuePair {
+                key: 4,
+                value: "value4".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(5),
+            Some(KeyValuePair {
+                key: 5,
+                value: "value5".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(6),
+            Some(KeyValuePair {
+                key: 6,
+                value: "value6".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(7),
+            Some(KeyValuePair {
+                key: 7,
+                value: "value7".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(8),
+            Some(KeyValuePair {
+                key: 8,
+                value: "value8".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(9),
+            Some(KeyValuePair {
+                key: 9,
+                value: "value9".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(10),
+            Some(KeyValuePair {
+                key: 10,
+                value: "value10".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(11),
+            Some(KeyValuePair {
+                key: 11,
+                value: "value11".as_bytes().to_vec()
+            })
+        );
+        assert_eq!(
+            btree.search(12),
+            Some(KeyValuePair {
+                key: 12,
+                value: "value12".as_bytes().to_vec()
+            })
+        );
 
-    //     // Check the values are ordered correctly
-    //     let keys: Vec<&u32> = btree.keys().collect();
-    //     assert_eq!(keys, vec![&1, &2, &3, &4, &5, &6, &7, &8]);
-    // }
+        // Check the values are ordered correctly
+        let keys: Vec<u64> = btree.keys().collect();
+        assert_eq!(keys, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    }
 
     // #[test]
     // fn test_remove() {
